@@ -1,0 +1,7 @@
+node_modules/
+# node_modules/ contains downloaded libraries and should not be uploaded to GitHub.
+
+.env
+# .env will contain secret API tokens and must stay private.
+.wwebjs_auth/
+.wwebjs_cache/
