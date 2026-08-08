@@ -3,5 +3,13 @@ node_modules/
 
 .env
 # .env will contain secret API tokens and must stay private.
-.wwebjs_auth/
+wwebjs_auth/
+.wwebjs_auth
+.wwebjs_auth/**
 .wwebjs_cache/
+.wwebjs_auth_backup/
+.wwebjs_auth_before_pin/
+.wwebjs_cache_backup/
+.wwebjs_cache_before_pin/
+auth_info_baileys/
+auth_info_baileys/**

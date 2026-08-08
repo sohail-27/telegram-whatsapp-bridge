@@ -1,104 +1,192 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
-import whatsappWeb from 'whatsapp-web.js';
+import makeWASocket, {
+    Browsers,
+    DisconnectReason,
+    useMultiFileAuthState
+} from '@whiskeysockets/baileys';
+import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 
 console.log('Step 1: File started');
 
-const { Client, LocalAuth } = whatsappWeb;
+let isWhatsAppReady = false;// This flag will be set to true when WhatsApp is ready.
+
 
 // ---------- Telegram setup ----------
 
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const telegramGroupId = process.env.TELEGRAM_GROUP_ID;
+const whatsappGroupId = process.env.WHATSAPP_GROUP_ID;
+
+
 
 if (!telegramToken) {
-  throw new Error('TELEGRAM_BOT_TOKEN is missing from .env');
+    throw new Error('TELEGRAM_BOT_TOKEN is missing from .env');
 }
 
 if (!telegramGroupId) {
-  throw new Error('TELEGRAM_GROUP_ID is missing from .env');
+    throw new Error('TELEGRAM_GROUP_ID is missing from .env');
+}
+
+if (!whatsappGroupId) {
+    throw new Error('WHATSAPP_GROUP_ID is missing from .env');
 }
 
 const bot = new Telegraf(telegramToken);
 
-bot.on('text', (ctx) => {
-  if (String(ctx.chat.id) !== telegramGroupId) {
-    return;
-  }
+// bot.on('message', (ctx) => {});
 
-  console.log(`[Telegram] ${ctx.from?.first_name}: ${ctx.message.text}`);
+bot.on('text', async (ctx) => {
+
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const text = ctx.message.text;
+
+    console.log(`[Telegram received] ${senderName}: ${text}`);
+
+    const forwardedText = `[Telegram] ${senderName}: ${text}`;
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait for [WA] Ready before sending Telegram messages.');
+            return;
+        }
+        await whatsapp.sendMessage(whatsappGroupId, forwardedText);
+
+        console.log('Sent Telegram message to WhatsApp:', forwardedText);
+    } catch (error) {
+        console.error('Could not send Telegram message to Whatsapp:', error);
+    }
 });
 
 bot.catch((error) => {
-  console.error('Telegram bot error:', error);
+    console.error('Telegram bot error:', error);
 });
+
+
 
 // ---------- WhatsApp setup ----------
 
-// LocalAuth saves the QR login so you normally scan it only once.
-const whatsapp = new Client({
-  authStrategy: new LocalAuth({
-    clientId: 'telegram-whatsapp-bridge'
-  }),
-  puppeteer: {
-    headless: true
-  }
-});
+let whatsapp;
 
-// This runs when WhatsApp needs you to link your phone.
-whatsapp.on('qr', (qr) => {
-  console.log('Scan this QR code using WhatsApp Linked Devices:');
-  qrcode.generate(qr, { small: true });
-});
+async function startWhatsApp() {
 
-// This runs after WhatsApp login succeeds.
-whatsapp.on('ready', () => {
-  console.log('WhatsApp is connected.');
-  console.log('Now ask someone to send a new message in your staff WhatsApp group.');
-});
+    // 1. load auth state
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
-whatsapp.on('message_create', (message) => {
-  // Incoming group messages use `from`.
-  // Messages you send use `to`.
-  const groupId = message.from.endsWith('@g.us')
-    ? message.from
-    : message.to;
+    //2. Create WhatsApp socket
+    whatsapp = makeWASocket({
+        auth: state,
+        browser: Browsers.macOS('Telegram WhatsApp Bridge'),
+        printQRInTerminal: true,
+        logger: pino({ level: 'silent' })
+    });
 
-  if (!groupId?.endsWith('@g.us')) {
-    return;
-  }
+    // 3. save credentials when updated
+    whatsapp.ev.on('creds.update', saveCreds);
 
-  console.log('WhatsApp group ID:', groupId);
-  console.log('Message text:', message.body);
-});
+    // 4. listen for connection update
+    whatsapp.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+
+        if (qr) {
+            console.log('Scan this QR code using WhatsApp Linked Devices:');
+            qrcode.generate(qr, { small: true });
+        }
+
+        if (connection === 'open') { //If WhatsApp connection is open, it means connected.
+            isWhatsAppReady = true; // Set the flag to true when WhatsApp is ready.
+            console.log('Baileys WhatsApp is connected.');
+        }
+
+        if (connection === 'close') {
+            isWhatsAppReady = false; // Set the flag to false when WhatsApp is disconnected.
+
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+            console.log('WhatsApp connection closed.');
+            console.log('Should reconnect:', shouldReconnect); // Log whether it should reconnect or not.
+
+            if (shouldReconnect) {
+                startWhatsApp(); // Attempt to reconnect if it should.
+            }
+        }
+    });
+
+    // 5. listen for new messages
+    whatsapp.ev.on('message-upsert', async (event) => {
+        for (const message of event.messages) {
+            const groupId = message.key.remoteJid;
+
+            if (groupId !== whatsappGroupId) {
+                return;
+            }
+
+            const text = message.message?.conversation || message.message?.extendedTextMessage?.text; // Check for text in both conversation and extendedTextMessage
+
+            if (!text) {
+                console.log('WhatsApp message has no text. We will handle media later.');
+                return;
+            }
+
+            if (text.startsWith('[Telegram]')) {
+                console.log('Skipping message because it came from Telegram bridge.');
+                return;
+            }
+
+            const forwardedText = `[WhatsApp] ${text}`; // Prefix the message with [WhatsApp] to indicate its origin.
+
+            try{
+                await bot.telegram.sendMessage(telegramGroupId, forwardedText);
+                console.log('Sent WhatsApp message to Telegram:', forwardedText);
+            } catch(error){
+                console.error('Could not send WhatsApp message to Telegram:', error);
+            }
+        }
+    });
+
+
+}
+
 
 // ---------- Start and stop safely ----------
 
 async function start() {
-  console.log('Step 2: Starting Telegram...');
+    console.log('Step 2: Starting Telegram...');
 
-  bot.launch().catch((error) => {
-    console.error('Telegram could not start:', error);
-  });
+    bot.launch().catch((error) => {
+        console.error('Telegram could not start:', error);
+    });
+    console.log('Telegram bot is running and listening for messages.');
 
-  console.log('Step 3: Telegram listener started. Starting WhatsApp...');
-  await whatsapp.initialize();
+    console.log('Step 3: Starting WhatsApp...');
+
+    whatsapp.initialize().catch((error) => {
+        console.error('WhatsApp could not start:', error);
+    });
+
+    console.log('WhatsApp initialize command sent.');
 }
 
 async function stop(signal) {
-  console.log(`Stopping because of ${signal}...`);
+    console.log(`Stopping because of ${signal}...`);
 
-  await bot.stop(signal);
-  await whatsapp.destroy();
+    await bot.stop(signal);
+    await whatsapp.destroy();
 
-  process.exit(0);
+    process.exit(0);
 }
 
 process.once('SIGINT', () => stop('SIGINT'));
 process.once('SIGTERM', () => stop('SIGTERM'));
 
 start().catch((error) => {
-  console.error('Could not start the bridge:', error);
-  process.exit(1);
+    console.error('Could not start the bridge:', error);
+    process.exit(1);
 });
