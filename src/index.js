@@ -55,16 +55,16 @@ bot.on('text', async (ctx) => {
             console.log('WhatsApp is not ready yet. Please wait for [WA] Ready before sending Telegram messages.');
             return;
         }
-        await whatsapp.sendMessage(whatsappGroupId, forwardedText);
+        await whatsapp.sendMessage(whatsappGroupId, { text: forwardedText });
 
         console.log('Sent Telegram message to WhatsApp:', forwardedText);
     } catch (error) {
-        console.error('Could not send Telegram message to Whatsapp:', error);
+        console.error('Could not send Telegram message to Whatsapp:', error.message);
     }
 });
 
 bot.catch((error) => {
-    console.error('Telegram bot error:', error);
+    console.error('Telegram bot error:', error.message);
 });
 
 
@@ -120,7 +120,7 @@ async function startWhatsApp() {
     });
 
     // 5. listen for new messages
-    whatsapp.ev.on('message-upsert', async (event) => {
+    whatsapp.ev.on('messages.upsert', async (event) => {
         for (const message of event.messages) {
             const groupId = message.key.remoteJid;
 
@@ -140,13 +140,38 @@ async function startWhatsApp() {
                 return;
             }
 
-            const forwardedText = `[WhatsApp] ${text}`; // Prefix the message with [WhatsApp] to indicate its origin.
+            const senderId = message.key.participant || message.key.remoteJid;
+            const cleanSenderId = senderId.replace('@lid', '').replace('@s.whatsapp.net', '');
 
-            try{
+            const contactNames = {
+                '158896660471898@lid': 'Sohail'
+            };
+
+            let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
+
+            try {
+                const metadata = await whatsapp.groupMetadata(groupId);
+
+                const participant = metadata.participants.find((member) => {
+                    return member.id === senderId;
+                });
+
+                senderName =
+                    contactNames[senderId] ||
+                    participant?.name ||
+                    participant?.notify ||
+                    participant?.verifiedName ||
+                    `WhatsApp User ${cleanSenderId}`;
+            } catch (error) {
+                console.log('Could not get WhatsApp group sender name. Using contact map/fallback.');
+            }
+
+            const forwardedText = `[WhatsApp] ${senderName}: ${text}`;
+            try {
                 await bot.telegram.sendMessage(telegramGroupId, forwardedText);
                 console.log('Sent WhatsApp message to Telegram:', forwardedText);
-            } catch(error){
-                console.error('Could not send WhatsApp message to Telegram:', error);
+            } catch (error) {
+                console.error('Could not send WhatsApp message to Telegram:', error.message);
             }
         }
     });
@@ -161,24 +186,22 @@ async function start() {
     console.log('Step 2: Starting Telegram...');
 
     bot.launch().catch((error) => {
-        console.error('Telegram could not start:', error);
+        console.error('Telegram could not start:', error.message);
     });
     console.log('Telegram bot is running and listening for messages.');
 
     console.log('Step 3: Starting WhatsApp...');
 
-    whatsapp.initialize().catch((error) => {
-        console.error('WhatsApp could not start:', error);
-    });
+    await startWhatsApp();
 
-    console.log('WhatsApp initialize command sent.');
+    console.log('WhatsApp start command sent.')
 }
 
 async function stop(signal) {
     console.log(`Stopping because of ${signal}...`);
 
     await bot.stop(signal);
-    await whatsapp.destroy();
+    whatsapp?.end(); // Safely end the WhatsApp connection if it exists.
 
     process.exit(0);
 }
@@ -187,6 +210,6 @@ process.once('SIGINT', () => stop('SIGINT'));
 process.once('SIGTERM', () => stop('SIGTERM'));
 
 start().catch((error) => {
-    console.error('Could not start the bridge:', error);
+    console.error('Could not start the bridge:', error.message);
     process.exit(1);
 });
