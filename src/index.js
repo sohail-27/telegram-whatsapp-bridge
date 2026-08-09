@@ -3,6 +3,7 @@ import { Telegraf } from 'telegraf';
 import makeWASocket, {
     Browsers,
     DisconnectReason,
+    downloadMediaMessage,
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
@@ -128,6 +129,50 @@ async function startWhatsApp() {
                 return;
             }
 
+            const senderId = message.key.participant || message.key.remoteJid;
+            const cleanSenderId = senderId.replace('@lid', '').replace('@s.whatsapp.net', '');
+
+            const contactNames = {
+                '158896660471898@lid': 'Sohail',
+                '232143066259524@lid': 'Sohail'
+            };
+
+            let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
+
+            // handle media messages (images for now)
+            const imageMessage = message.message?.imageMessage;
+
+            if (imageMessage) {
+                try {
+                    const caption = imageMessage.caption || '';
+                    const photoBuffer = await downloadMediaMessage(
+                        message,
+                        'buffer',
+                        {},
+                        {
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: whatsapp.updateMediaMessage
+                        }
+                    );
+
+                    await bot.telegram.sendPhoto(
+                        telegramGroupId,
+                        { source: photoBuffer },
+                        {
+                            caption: caption ? `[WhatsApp] ${senderName}: ${caption}` : `[WhatsApp] ${senderName} sent a photo.`
+                        }
+
+                    );
+
+                    console.log(`sent WhatsApp photo to Telegram from ${senderName}`);
+                } catch (error) {
+                    console.error('Could not send WhatsApp photo to Telegram:', error.message);
+                }
+
+                return; // Skip further processing for this message since it's a media message.
+            }
+
+
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text; // Check for text in both conversation and extendedTextMessage
 
             if (!text) {
@@ -140,14 +185,6 @@ async function startWhatsApp() {
                 return;
             }
 
-            const senderId = message.key.participant || message.key.remoteJid;
-            const cleanSenderId = senderId.replace('@lid', '').replace('@s.whatsapp.net', '');
-
-            const contactNames = {
-                '158896660471898@lid': 'Sohail'
-            };
-
-            let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
 
             try {
                 const metadata = await whatsapp.groupMetadata(groupId);
