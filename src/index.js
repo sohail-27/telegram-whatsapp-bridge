@@ -64,6 +64,84 @@ bot.on('text', async (ctx) => {
     }
 });
 
+bot.on('photo', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const caption = ctx.message.caption || '';
+
+    console.log(`[Telegram photo received] ${senderName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending telegram photos.');
+            return;
+        }
+
+        const photos = ctx.message.photo; // Get the array of photo sizes
+        const bestPhoto = photos[photos.length - 1]; // Get the highest resolution photo (last in the array)
+
+        const fileLink = await ctx.telegram.getFileLink(bestPhoto.file_id); // Get the direct link to the photo file
+        const response = await fetch(fileLink); // Fetch the photo from the link
+        const arrayBuffer = await response.arrayBuffer(); //Convert the response to an ArrayBuffer,ArrayBuffer is a lowlevel representation of binary data,which is suitable for send to WA.
+        const photoBuffer = Buffer.from(arrayBuffer); // Convert the ArrayBuffer to a Node.js Buffer, which is what Baileys expects for media messages.
+
+        await whatsapp.sendMessage(whatsappGroupId, {
+            image: photoBuffer, // Send the photo as an image message
+            caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a photo.`
+        });
+
+        console.log(`Sent Telegram photo to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram photo to WhatsApp:', error.message);
+    }
+});
+
+bot.on('document', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const caption = ctx.message.caption || '';
+    const document = ctx.message.document;
+    const fileName = document.file_name || 'telegram-document';
+    const mimeType = document.mime_type || 'application/octet-stream';
+
+    console.log(`[Telegram document received] ${senderName}: ${fileName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram documents.');
+            return;
+        }
+
+
+        const fileLink = await ctx.telegram.getFileLink(document.file_id)
+        const response = await fetch(fileLink);
+        const arrayBuffer = await response.arrayBuffer();
+        const documentBuffer = Buffer.from(arrayBuffer);
+
+        await whatsapp.sendMessage(whatsappGroupId, {
+            document: documentBuffer,
+            fileName: fileName,
+            mimeType: mimeType,
+            caption: caption
+                ? `[Telegram] ${senderName}: ${caption}`
+                : `[Telegram] ${senderName} sent a document: ${fileName}`
+        });
+
+        console.log(`Sent Telegram document to WhatsApp from ${senderName}: ${fileName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram document to WhatsApp:', error.message);
+    }
+
+});
+
 bot.catch((error) => {
     console.error('Telegram bot error:', error.message);
 });
@@ -145,6 +223,12 @@ async function startWhatsApp() {
             if (imageMessage) {
                 try {
                     const caption = imageMessage.caption || '';
+
+                    if (caption.startsWith('[Telegram]')) {
+                        console.log('Skipping photo because it came from Telegram bridge.');
+                        return;
+                    }
+
                     const photoBuffer = await downloadMediaMessage(
                         message,
                         'buffer',
@@ -172,6 +256,52 @@ async function startWhatsApp() {
                 return; // Skip further processing for this message since it's a media message.
             }
 
+            // handle document messages for now
+            const documentMessage = message.message?.documentMessage;
+
+            if (documentMessage) {
+                try {
+                    const caption = documentMessage.caption || ''; // Get the caption if available
+
+                    if (caption.startsWith('[Telegram]')) {
+                        console.log('Skipping document because it came from Telegram bridge.');
+                        return;
+                    }
+                    
+                    const fileName = documentMessage.fileName || 'whatsapp_document'; // Get the file name or use a default
+
+                    const documentBuffer = await downloadMediaMessage(
+                        message,
+                        'buffer',
+                        {},
+                        {
+
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: whatsapp.updateMediaMessage
+                        }
+                    );
+
+                    await bot.telegram.sendDocument(
+                        telegramGroupId,
+                        {
+                            source: documentBuffer,
+                            filename: fileName
+                        },
+                        {
+                            caption: caption
+                                ? `[WhatsApp] ${senderName}: ${caption}`
+                                : `[WhatsApp] ${senderName} sent a document: ${fileName}`
+                        }
+                    );
+
+                    console.log(`Sent WhatsApp document to Telegram from ${senderName}: ${fileName}`);
+
+                } catch (error) {
+                    console.log('Could not send WhatsApp document to Telegram:', error.message);
+                }
+
+                return;
+            }
 
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text; // Check for text in both conversation and extendedTextMessage
 
