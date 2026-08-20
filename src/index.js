@@ -3,6 +3,7 @@ import { Telegraf } from 'telegraf';
 import makeWASocket, {
     Browsers,
     DisconnectReason,
+    downloadEncryptedContent,
     downloadMediaMessage,
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
@@ -19,6 +20,8 @@ let isWhatsAppReady = false;// This flag will be set to true when WhatsApp is re
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const telegramGroupId = process.env.TELEGRAM_GROUP_ID;
 const whatsappGroupId = process.env.WHATSAPP_GROUP_ID;
+
+const MAX_VIDEO_SIZE_BYTES = 16 * 1024 * 1024;
 
 
 
@@ -138,6 +141,44 @@ bot.on('document', async (ctx) => {
 
     } catch (error) {
         console.error('Could not send Telegram document to WhatsApp:', error.message);
+    }
+
+});
+
+
+// handle Video 
+bot.on('video', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const caption = ctx.message.caption || '';
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const video = ctx.message.video;
+
+    console.log(`[Telegram video received] ${senderName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram videos.');
+            return;
+        }
+
+        const fileLink = await ctx.telegram.getFileLink(video.file_id);
+        const response = await fetch(fileLink);
+        const arrayBuffer = await response.arrayBuffer();
+        const videoBuffer = Buffer.from(arrayBuffer);
+
+        await whatsapp.sendMessage(whatsappGroupId, {
+            video: videoBuffer,
+            caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a video.`
+        });
+
+        console.log(`Sent Telegram video to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram video to WhatsApp:', error.message);
+
     }
 
 });
@@ -267,7 +308,7 @@ async function startWhatsApp() {
                         console.log('Skipping document because it came from Telegram bridge.');
                         return;
                     }
-                    
+
                     const fileName = documentMessage.fileName || 'whatsapp_document'; // Get the file name or use a default
 
                     const documentBuffer = await downloadMediaMessage(
@@ -298,6 +339,47 @@ async function startWhatsApp() {
 
                 } catch (error) {
                     console.log('Could not send WhatsApp document to Telegram:', error.message);
+                }
+
+                return;
+            }
+
+
+            // handle video messages for now
+            const videoMessage = message.message?.videoMessage;
+
+            if (videoMessage) {
+                try {
+                    const caption = videoMessage.caption || '';
+
+                    if (caption.startsWith('[Telegram]')) {
+                        console.log('Skipping video because it came from Telegram bridge.');
+                        return;
+                    }
+
+                    const videoBuffer = await downloadMediaMessage(
+                        message,
+                        'buffer',
+                        {},
+                        {
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: whatsapp.updateMediaMessage
+                        }
+                    );
+
+                    await bot.telegram.sendVideo(
+                        telegramGroupId,
+                        { source: videoBuffer },
+                        {
+                            caption: caption ? `[WhatsApp] ${senderName}: ${caption}` : `[WhatsApp] ${senderName} sent a video.`
+                        }
+                    );
+
+                    console.log(`Sent WhatsApp video to Telegram from ${senderName}`)
+
+                } catch (error) {
+                    console.error('Could not send WhatsApp video to Telegram:', error.message);
+
                 }
 
                 return;
