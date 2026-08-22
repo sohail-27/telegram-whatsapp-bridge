@@ -13,6 +13,7 @@ import qrcode from 'qrcode-terminal';
 console.log('Step 1: File started');
 
 let isWhatsAppReady = false;// This flag will be set to true when WhatsApp is ready.
+const bridgeSentWhatsAppMessageIds = new Set();
 
 
 // ---------- Telegram setup ----------
@@ -59,7 +60,10 @@ bot.on('text', async (ctx) => {
             console.log('WhatsApp is not ready yet. Please wait for [WA] Ready before sending Telegram messages.');
             return;
         }
-        await whatsapp.sendMessage(whatsappGroupId, { text: forwardedText });
+        const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: forwardedText
+        });
+        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log('Sent Telegram message to WhatsApp:', forwardedText);
     } catch (error) {
@@ -91,10 +95,13 @@ bot.on('photo', async (ctx) => {
         const arrayBuffer = await response.arrayBuffer(); //Convert the response to an ArrayBuffer,ArrayBuffer is a lowlevel representation of binary data,which is suitable for send to WA.
         const photoBuffer = Buffer.from(arrayBuffer); // Convert the ArrayBuffer to a Node.js Buffer, which is what Baileys expects for media messages.
 
-        await whatsapp.sendMessage(whatsappGroupId, {
+        const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             image: photoBuffer, // Send the photo as an image message
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a photo.`
         });
+
+        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
+
 
         console.log(`Sent Telegram photo to WhatsApp from ${senderName}`);
 
@@ -128,14 +135,16 @@ bot.on('document', async (ctx) => {
         const arrayBuffer = await response.arrayBuffer();
         const documentBuffer = Buffer.from(arrayBuffer);
 
-        await whatsapp.sendMessage(whatsappGroupId, {
+        const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             document: documentBuffer,
             fileName: fileName,
-            mimeType: mimeType,
+            mimetype: mimeType,
             caption: caption
                 ? `[Telegram] ${senderName}: ${caption}`
                 : `[Telegram] ${senderName} sent a document: ${fileName}`
         });
+
+        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log(`Sent Telegram document to WhatsApp from ${senderName}: ${fileName}`);
 
@@ -169,10 +178,12 @@ bot.on('video', async (ctx) => {
         const arrayBuffer = await response.arrayBuffer();
         const videoBuffer = Buffer.from(arrayBuffer);
 
-        await whatsapp.sendMessage(whatsappGroupId, {
+        const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             video: videoBuffer,
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a video.`
         });
+
+        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);
 
         console.log(`Sent Telegram video to WhatsApp from ${senderName}`);
 
@@ -182,6 +193,54 @@ bot.on('video', async (ctx) => {
     }
 
 });
+
+// handle voice note only
+bot.on('voice', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const voice = ctx.message.voice;
+
+    console.log(`[Telegram voice received] ${senderName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram videos.');
+            return;
+        }
+
+        const fileLink = await ctx.telegram.getFileLink(voice.file_id);
+        const response = await fetch(fileLink);
+        const arrayBuffer = await response.arrayBuffer();
+        const voiceBuffer = Buffer.from(arrayBuffer);
+
+        const sentVoiceMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            audio: voiceBuffer,
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true
+        });
+
+        bridgeSentWhatsAppMessageIds.add(sentVoiceMessage.key.id);
+
+        const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: `[Telegram] ${senderName} sent a voice note.`
+
+        });
+
+        bridgeSentWhatsAppMessageIds.add(sentTextMessage.key.id);
+
+        console.log(`Sent Telegram voice note to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram voice note to WhatsApp:', error.message);
+
+    }
+
+
+})
+
 
 bot.catch((error) => {
     console.error('Telegram bot error:', error.message);
@@ -243,6 +302,12 @@ async function startWhatsApp() {
     whatsapp.ev.on('messages.upsert', async (event) => {
         for (const message of event.messages) {
             const groupId = message.key.remoteJid;
+
+            if (bridgeSentWhatsAppMessageIds.has(message.key.id)) {
+                console.log('Skipping WhatsApp message because it was created by Telegram bridge.');
+                bridgeSentWhatsAppMessageIds.delete(message.key.id);
+                continue;
+            }
 
             if (groupId !== whatsappGroupId) {
                 return;
@@ -380,6 +445,52 @@ async function startWhatsApp() {
                 } catch (error) {
                     console.error('Could not send WhatsApp video to Telegram:', error.message);
 
+                }
+
+                return;
+            }
+
+            //handle audio message for now
+            const audioMessage = message.message?.audioMessage;
+
+            if (audioMessage) {
+                try {
+                    const audioBuffer = await downloadMediaMessage(
+                        message,
+                        'buffer',
+                        {},
+                        {
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: whatsapp.updateMediaMessage
+                        }
+                    );
+
+                    if (audioMessage.ptt) {
+                        await bot.telegram.sendVoice(
+                            telegramGroupId,
+                            { source: audioBuffer },// else also have same output as audioBuffer but, diff is how TG will identify between audio and vioce notes and TG method sendVoice and sendAudio
+                            {
+                                caption: `[WhatsApp] ${senderName} sent a voice note.`
+                            }
+                        );
+
+                        console.log(`Sent WhatsApp voice note to Telegram from ${senderName}`)
+
+                    } else {
+                        await bot.telegram.sendAudio(
+                            telegramGroupId,
+                            { source: audioBuffer },
+                            {
+                                caption: `[WhatsApp] ${senderName} sent an audio file.`
+                            }
+                        );
+
+                        console.log(`Sent WhatsApp audio to Telegram from ${senderName}`)
+
+                    }
+
+                } catch (error) {
+                    console.error('Could not send WhatsApp audio to Telegram:', error.message);
                 }
 
                 return;
