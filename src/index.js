@@ -237,9 +237,58 @@ bot.on('voice', async (ctx) => {
         console.error('Could not send Telegram voice note to WhatsApp:', error.message);
 
     }
+});
 
 
-})
+// handle audio file only
+bot.on('audio', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const audio = ctx.message.audio;
+    const caption = ctx.message.caption || ''; // TG doesn`t allow to send caption with, will discuss later and appreciate.
+    const fileName = audio.file_name || 'telegram-audio';
+    const mimeType = audio.mime_type || 'audio/mpeg';
+
+    console.log(`[Telegram audio received] ${senderName}: ${fileName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram audio files.');
+            return;
+        }
+
+        const fileLink = await ctx.telegram.getFileLink(audio.file_id);
+        const response = await fetch(fileLink);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = Buffer.from(arrayBuffer);
+
+        const sentAudioMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            audio: audioBuffer,
+            mimetype: mimeType,
+            fileName: fileName
+        });
+
+        bridgeSentWhatsAppMessageIds.add(sentAudioMessage.key.id);
+
+        const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: caption
+                ? `[Telegram] ${senderName}: ${caption}`
+                : `[Telegram] ${senderName} sent an audio file: ${fileName}`
+        });
+
+        bridgeSentWhatsAppMessageIds.add(sentTextMessage.key.id);
+
+        console.log(`Sent Telegram audio to WhatsApp from ${senderName}: ${fileName}`);
+
+
+    } catch (error) {
+        console.error('Could not send Telegram audio to WhatsApp:', error.message);
+
+    }
+});
 
 
 bot.catch((error) => {
