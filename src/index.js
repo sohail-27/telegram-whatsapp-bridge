@@ -9,6 +9,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode from 'qrcode-terminal';
+import { quote } from 'telegraf/format';
 
 console.log('Step 1: File started');
 
@@ -40,6 +41,93 @@ if (!whatsappGroupId) {
 
 const bot = new Telegraf(telegramToken);
 
+// Telegram text reply -> WhatsApp means IDENTIFYING THE OLDER MESSAGE TYPE
+// This is for what user select to reply and w'll handle what to reply- go bottom of function
+function getTelegramReplyText(ctx) {
+    const repliedMessage = ctx.message.reply_to_message;
+
+    if (!repliedMessage) {
+        return '';
+    }
+
+    if (repliedMessage.text) {
+        return repliedMessage.text;
+    }
+
+    if (repliedMessage.caption) {
+        return repliedMessage.caption;
+    }
+
+    if (repliedMessage.photo) {
+        return '[photo]';
+    }
+
+    if (repliedMessage.document) {
+        return `[document: ${repliedMessage.document.file_name || 'file'}]`;
+    }
+
+    if (repliedMessage.video) {
+        return '[video]';
+    }
+
+    if (repliedMessage.voice) {
+        return '[voice note]';
+    }
+
+    if (repliedMessage.audio) {
+        return `[audio: ${repliedMessage.audio.file_name || 'audio'}]`;
+    }
+
+    return '[message]';// If someone is reply to other than above like location, stickers, contact or unknown type
+
+    // we also need to change the reply type like - for direct new message[implemented], for reply, change code in bot.on text
+};
+
+
+// WhatsApp text reply -> Telegram
+function getWhatsAppQuotedText(message) {
+    const contextInfo =
+        message.message?.extendedTextMessage?.contextInfo ||
+        message.message?.imageMessage?.contextInfo ||
+        message.message?.documentMessage?.contextInfo ||
+        message.message?.videoMessage?.contextInfo ||
+        message.message?.audioMessage?.contextInfo;
+
+    const quotedMessage = contextInfo?.quotedMessage;
+
+    if (!quotedMessage) {
+        return '';
+    }
+
+    if (quotedMessage.conversation) { // If old message was simple WA text, return it.
+        return quotedMessage.conversation;
+    }
+
+    if (quotedMessage.extendedTextMessage?.text) { //If old message was extended text, return it. Like - font, formatting etc...
+        return quotedMessage.extendedTextMessage.text;
+    }
+
+    if (quotedMessage.imageMessage) {
+        return quotedMessage.imageMessage.caption || '[photo]';
+    }
+
+    if (quotedMessage.documentMessage) {
+        return quotedMessage.documentMessage.caption ||
+            `[document: ${quotedMessage.documentMessage.fileName || 'file'}]`;
+    }
+
+    if (quotedMessage.videoMessage) {
+        return quotedMessage.videoMessage.caption || '[video]';
+    }
+
+    if (quotedMessage.audioMessage) {
+        return quotedMessage.audioMessage.ptt ? '[voice note]' : '[audio]';
+    }
+
+    return '[message]';
+}
+
+
 // bot.on('message', (ctx) => {});
 
 bot.on('text', async (ctx) => {
@@ -53,7 +141,13 @@ bot.on('text', async (ctx) => {
 
     console.log(`[Telegram received] ${senderName}: ${text}`);
 
-    const forwardedText = `[Telegram] ${senderName}: ${text}`;
+    //const forwardedText = `[Telegram] ${senderName}: ${text}`;
+    const replyText = getTelegramReplyText(ctx);
+
+    const forwardedText = replyText
+        ? `[Telegram] ${senderName} replied to:\n"${replyText}"\n\n${text}`
+        : `[Telegram] ${senderName}: ${text}`;
+
 
     try {
         if (!isWhatsAppReady) {
@@ -575,7 +669,14 @@ async function startWhatsApp() {
                 console.log('Could not get WhatsApp group sender name. Using contact map/fallback.');
             }
 
-            const forwardedText = `[WhatsApp] ${senderName}: ${text}`;
+            //const forwardedText = `[WhatsApp] ${senderName}: ${text}`;
+            const quotedText = getWhatsAppQuotedText(message);
+
+            const forwardedText = quotedText
+                ? `[WhatsApp] ${senderName} replied to:\n"${quotedText}"\n\n${text}`
+                : `[WhatsApp] ${senderName}: ${text}`;
+
+
             try {
                 await bot.telegram.sendMessage(telegramGroupId, forwardedText);
                 console.log('Sent WhatsApp message to Telegram:', forwardedText);
