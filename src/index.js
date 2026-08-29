@@ -14,7 +14,15 @@ import { quote } from 'telegraf/format';
 console.log('Step 1: File started');
 
 let isWhatsAppReady = false;// This flag will be set to true when WhatsApp is ready.
+
 const bridgeSentWhatsAppMessageIds = new Set();
+function rememberBridgeWhatsAppMessage(sentMessage) { // add WA message ID to bridgeSentWhatsAppMessageIds
+    const messageId = sentMessage?.key?.id;
+
+    if (messageId) {
+        bridgeSentWhatsAppMessageIds.add(messageId);
+    }
+}
 
 
 // ---------- Telegram setup ----------
@@ -40,6 +48,16 @@ if (!whatsappGroupId) {
 }
 
 const bot = new Telegraf(telegramToken);
+
+
+async function downloadTelegramFile(ctx, fileId) {
+    const fileLink = await ctx.telegram.getFileLink(fileId); // Get the direct link to the photo file
+    const response = await fetch(fileLink); // Fetch the photo from the link
+    const arrayBuffer = await response.arrayBuffer(); //Convert the response to an ArrayBuffer,ArrayBuffer is a lowlevel representation of binary data,which is suitable for send to WA.
+
+    return Buffer.from(arrayBuffer); // Convert the ArrayBuffer to a Node.js Buffer, which is what Baileys expects for media messages.
+}
+
 
 // Telegram text reply -> WhatsApp means IDENTIFYING THE OLDER MESSAGE TYPE
 // This is for what user select to reply and w'll handle what to reply- go bottom of function
@@ -82,7 +100,6 @@ function getTelegramReplyText(ctx) {
 
     // we also need to change the reply type like - for direct new message[implemented], for reply, change code in bot.on text
 };
-
 
 // WhatsApp text reply -> Telegram
 function getWhatsAppQuotedText(message) {
@@ -157,7 +174,7 @@ bot.on('text', async (ctx) => {
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: forwardedText
         });
-        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
+        rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log('Sent Telegram message to WhatsApp:', forwardedText);
     } catch (error) {
@@ -184,17 +201,14 @@ bot.on('photo', async (ctx) => {
         const photos = ctx.message.photo; // Get the array of photo sizes
         const bestPhoto = photos[photos.length - 1]; // Get the highest resolution photo (last in the array)
 
-        const fileLink = await ctx.telegram.getFileLink(bestPhoto.file_id); // Get the direct link to the photo file
-        const response = await fetch(fileLink); // Fetch the photo from the link
-        const arrayBuffer = await response.arrayBuffer(); //Convert the response to an ArrayBuffer,ArrayBuffer is a lowlevel representation of binary data,which is suitable for send to WA.
-        const photoBuffer = Buffer.from(arrayBuffer); // Convert the ArrayBuffer to a Node.js Buffer, which is what Baileys expects for media messages.
+        const photoBuffer = await downloadTelegramFile(ctx, bestPhoto.file_id);
 
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             image: photoBuffer, // Send the photo as an image message
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a photo.`
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
+        rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
 
         console.log(`Sent Telegram photo to WhatsApp from ${senderName}`);
@@ -223,11 +237,7 @@ bot.on('document', async (ctx) => {
             return;
         }
 
-
-        const fileLink = await ctx.telegram.getFileLink(document.file_id)
-        const response = await fetch(fileLink);
-        const arrayBuffer = await response.arrayBuffer();
-        const documentBuffer = Buffer.from(arrayBuffer);
+        const documentBuffer = await downloadTelegramFile(ctx, document.file_id);
 
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             document: documentBuffer,
@@ -238,7 +248,7 @@ bot.on('document', async (ctx) => {
                 : `[Telegram] ${senderName} sent a document: ${fileName}`
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);// add WA message ID to bridgeSentWhatsAppMessageIds
+        rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log(`Sent Telegram document to WhatsApp from ${senderName}: ${fileName}`);
 
@@ -267,17 +277,14 @@ bot.on('video', async (ctx) => {
             return;
         }
 
-        const fileLink = await ctx.telegram.getFileLink(video.file_id);
-        const response = await fetch(fileLink);
-        const arrayBuffer = await response.arrayBuffer();
-        const videoBuffer = Buffer.from(arrayBuffer);
+        const videoBuffer = await downloadTelegramFile(ctx, video.file_id);
 
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             video: videoBuffer,
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a video.`
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentMessage.key.id);
+        rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log(`Sent Telegram video to WhatsApp from ${senderName}`);
 
@@ -305,10 +312,8 @@ bot.on('voice', async (ctx) => {
             return;
         }
 
-        const fileLink = await ctx.telegram.getFileLink(voice.file_id);
-        const response = await fetch(fileLink);
-        const arrayBuffer = await response.arrayBuffer();
-        const voiceBuffer = Buffer.from(arrayBuffer);
+
+        const voiceBuffer = await downloadTelegramFile(ctx, voice.file_id);
 
         const sentVoiceMessage = await whatsapp.sendMessage(whatsappGroupId, {
             audio: voiceBuffer,
@@ -316,14 +321,14 @@ bot.on('voice', async (ctx) => {
             ptt: true
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentVoiceMessage.key.id);
+        rememberBridgeWhatsAppMessage(sentVoiceMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: `[Telegram] ${senderName} sent a voice note.`
 
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentTextMessage.key.id);
+        rememberBridgeWhatsAppMessage(sentTextMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log(`Sent Telegram voice note to WhatsApp from ${senderName}`);
 
@@ -354,10 +359,7 @@ bot.on('audio', async (ctx) => {
             return;
         }
 
-        const fileLink = await ctx.telegram.getFileLink(audio.file_id);
-        const response = await fetch(fileLink);
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = Buffer.from(arrayBuffer);
+        const audioBuffer = await downloadTelegramFile(ctx, audio.file_id);
 
         const sentAudioMessage = await whatsapp.sendMessage(whatsappGroupId, {
             audio: audioBuffer,
@@ -365,7 +367,7 @@ bot.on('audio', async (ctx) => {
             fileName: fileName
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentAudioMessage.key.id);
+        rememberBridgeWhatsAppMessage(sentAudioMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: caption
@@ -373,7 +375,7 @@ bot.on('audio', async (ctx) => {
                 : `[Telegram] ${senderName} sent an audio file: ${fileName}`
         });
 
-        bridgeSentWhatsAppMessageIds.add(sentTextMessage.key.id);
+        rememberBridgeWhatsAppMessage(sentTextMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
 
         console.log(`Sent Telegram audio to WhatsApp from ${senderName}: ${fileName}`);
 
@@ -453,7 +455,13 @@ async function startWhatsApp() {
             }
 
             if (groupId !== whatsappGroupId) {
-                return;
+                //return;
+                continue;
+                /* not return, if Rahul from other group and shoaib from our group send message at same time then Bailey treat them
+                 event.messages = [
+                 rahulMessage,
+                 shoaibMessage
+                 ]; then return means stop everything but continue will checks every possibilities orr still processing for 2nd message. */
             }
 
             const senderId = message.key.participant || message.key.remoteJid;
@@ -502,7 +510,8 @@ async function startWhatsApp() {
                     console.error('Could not send WhatsApp photo to Telegram:', error.message);
                 }
 
-                return; // Skip further processing for this message since it's a media message.
+                //return;
+                continue; // while sending this photo someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
             }
 
             // handle document messages for now
@@ -549,7 +558,8 @@ async function startWhatsApp() {
                     console.log('Could not send WhatsApp document to Telegram:', error.message);
                 }
 
-                return;
+                //return;
+                continue;// while sending this photo someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
             }
 
 
@@ -590,7 +600,9 @@ async function startWhatsApp() {
 
                 }
 
-                return;
+                //return;
+                continue;// while sending this photo someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
+
             }
 
             //handle audio message for now
@@ -636,19 +648,23 @@ async function startWhatsApp() {
                     console.error('Could not send WhatsApp audio to Telegram:', error.message);
                 }
 
-                return;
+                //return;
+                continue;// while sending this photo someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
+
             }
 
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text; // Check for text in both conversation and extendedTextMessage
 
             if (!text) {
                 console.log('WhatsApp message has no text. We will handle media later.');
-                return;
+                //return;
+                continue;
             }
 
             if (text.startsWith('[Telegram]')) {
                 console.log('Skipping message because it came from Telegram bridge.');
-                return;
+                //return;
+                continue;
             }
 
 
