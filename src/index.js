@@ -8,8 +8,9 @@ import makeWASocket, {
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
+import qrcode, { error } from 'qrcode-terminal';
 import { quote } from 'telegraf/format';
+
 
 console.log('Step 1: File started');
 
@@ -30,6 +31,13 @@ function rememberBridgeWhatsAppMessage(sentMessage) { // add WA message ID to br
 const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
 const telegramGroupId = process.env.TELEGRAM_GROUP_ID;
 const whatsappGroupId = process.env.WHATSAPP_GROUP_ID;
+
+
+//Because it is inside the listener, JavaScript creates this same object again for every WhatsApp message. Earlier it was above imageMessage in WA listener.
+const contactNames = {
+    '158896660471898@lid': 'Sohail',
+    '232143066259524@lid': 'Sohail'
+};
 
 const MAX_VIDEO_SIZE_BYTES = 16 * 1024 * 1024;
 
@@ -386,10 +394,52 @@ bot.on('audio', async (ctx) => {
     }
 });
 
+// Handle Location
+bot.on('location', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const location = ctx.message.location;
+
+    console.log(`[Telegram location received] ${senderName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram audio files.');
+            return;
+        }
+
+        const sentLocationMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            location: {
+                degreesLatitude: location.latitude,
+                degreesLongitude: location.longitude
+            }
+        });
+
+        rememberBridgeWhatsAppMessage(sentLocationMessage);
+
+        const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: `[Telegram] ${senderName} shared a location.`
+        });
+
+        rememberBridgeWhatsAppMessage(sentTextMessage);
+
+        console.log(`Sent Telegram location to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram location to WhatsApp:', error.message);
+
+    }
+
+});
+
 
 bot.catch((error) => {
     console.error('Telegram bot error:', error.message);
 });
+
 
 
 
@@ -435,11 +485,21 @@ async function startWhatsApp() {
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
             console.log('WhatsApp connection closed.');
-            console.log('Should reconnect:', shouldReconnect); // Log whether it should reconnect or not.
 
             if (shouldReconnect) {
-                startWhatsApp(); // Attempt to reconnect if it should.
+                console.log('Reconnecting WhatsApp in 3 seconds...'); //A short pause helps when Wi‑Fi briefly drops, WhatsApp’s server is temporarily unavailable, or the old socket is still closing.
+
+                setTimeout(() => {
+                    startWhatsApp().catch((error) => { //.catch(...) prevents a reconnection error from becoming an unhandled crash and prints a clear reason instead.
+                        console.error('WhatsApp reconnect failed:', error.message);
+                    });
+
+                }, 3000);
+            } else {
+                console.log('WhatsApp was logged out. Link the device again to continue.');
+
             }
+
         }
     });
 
@@ -467,11 +527,6 @@ async function startWhatsApp() {
             const senderId = message.key.participant || message.key.remoteJid;
             const cleanSenderId = senderId.replace('@lid', '').replace('@s.whatsapp.net', '');
 
-            const contactNames = {
-                '158896660471898@lid': 'Sohail',
-                '232143066259524@lid': 'Sohail'
-            };
-
             let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
 
             // handle media messages (images for now)
@@ -483,7 +538,7 @@ async function startWhatsApp() {
 
                     if (caption.startsWith('[Telegram]')) {
                         console.log('Skipping photo because it came from Telegram bridge.');
-                        return;
+                        continue;
                     }
 
                     const photoBuffer = await downloadMediaMessage(
@@ -523,7 +578,7 @@ async function startWhatsApp() {
 
                     if (caption.startsWith('[Telegram]')) {
                         console.log('Skipping document because it came from Telegram bridge.');
-                        return;
+                        continue;
                     }
 
                     const fileName = documentMessage.fileName || 'whatsapp_document'; // Get the file name or use a default
@@ -572,7 +627,7 @@ async function startWhatsApp() {
 
                     if (caption.startsWith('[Telegram]')) {
                         console.log('Skipping video because it came from Telegram bridge.');
-                        return;
+                        continue;
                     }
 
                     const videoBuffer = await downloadMediaMessage(
@@ -652,6 +707,32 @@ async function startWhatsApp() {
                 continue;// while sending this photo someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
 
             }
+
+            // hanlde location message
+            const locationMessage = message.message?.locationMessage;
+
+            if (locationMessage) {
+                try {
+                    await bot.telegram.sendLocation(
+                        telegramGroupId,
+                        locationMessage.degreesLatitude,
+                        locationMessage.degreesLongitude
+                    );
+
+                    await bot.telegram.sendMessage(
+                        telegramGroupId,
+                        `[WhatsApp] ${senderName} shared a location.`
+                    );
+
+                    console.log(`Sent WhatsApp location to Telegram from ${senderName}`);
+
+                } catch (error) {
+                    console.error('Could not send WhatsApp location to Telegram:', error.message);
+                }
+
+                continue;
+            }
+
 
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text; // Check for text in both conversation and extendedTextMessage
 
