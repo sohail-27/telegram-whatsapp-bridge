@@ -3,13 +3,11 @@ import { Telegraf } from 'telegraf';
 import makeWASocket, {
     Browsers,
     DisconnectReason,
-    downloadEncryptedContent,
     downloadMediaMessage,
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import qrcode, { error } from 'qrcode-terminal';
-import { quote } from 'telegraf/format';
 
 
 console.log('Step 1: File started');
@@ -436,6 +434,108 @@ bot.on('location', async (ctx) => {
 });
 
 
+// Hanlde Contact
+bot.on('contact', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const contact = ctx.message.contact;
+
+    const fullName = [
+        contact.first_name,
+        contact.last_name
+    ].filter(Boolean).join(' '); // remove unwanted spaces or other stuff and join name with leading space & .filter(Boolean) - removes empty or missing values:
+
+    const phoneNumber = contact.phone_number;
+    const whatsappId = phoneNumber.replace(/\D/g, ''); // replace non-digit character
+
+    console.log(`[Telegram contact received] ${senderName}: ${fullName}`);
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram contacts.');
+            return;
+        }
+
+        const vcard = [
+            'BEGIN:VCARD',
+            'VERSION:3.0',
+            `FN:${fullName}`,
+            `TEL;type=CELL;type=VOICE;waid=${whatsappId}:${phoneNumber}`,
+            'END:VCARD'
+        ].join('\n');
+
+        const sentContactMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            contacts: {
+                displayName: fullName,
+                contacts: [{ vcard }]
+            }
+        });
+
+        rememberBridgeWhatsAppMessage(sentContactMessage);
+
+        const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: `[Telegram] ${senderName} shared contact: ${fullName}`
+        });
+
+        rememberBridgeWhatsAppMessage(sentTextMessage);
+
+        console.log(`Sent Telegram contact to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram contact to WhatsApp:', error.message);
+    }
+
+});
+
+
+// Handle Static Stickersl
+bot.on('sticker', async (ctx) => {
+    if (String(ctx.chat.id) !== telegramGroupId) {
+        return;
+    }
+
+    const senderName = ctx.from?.first_name || 'Unknown sender';
+    const sticker = ctx.message.sticker;
+
+    console.log(`[Telegram sticker received] ${senderName}`);
+
+    if (sticker.is_animated || sticker.is_video) {
+        console.log('Only static Telegram stickers are supported right now.');
+        return;
+    }
+
+    try {
+        if (!isWhatsAppReady) {
+            console.log('WhatsApp is not ready yet. Please wait before sending Telegram stickers.');
+            return;
+        }
+
+        const stickerBuffer = await downloadTelegramFile(ctx, sticker.file_id);
+
+        const sentStickerMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            sticker: stickerBuffer
+        });
+
+        rememberBridgeWhatsAppMessage(sentStickerMessage);
+
+        const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
+            text: `[Telegram] ${senderName} sent a sticker.`
+        });
+
+        rememberBridgeWhatsAppMessage(sentTextMessage);
+
+        console.log(`Sent Telegram sticker to WhatsApp from ${senderName}`);
+
+    } catch (error) {
+        console.error('Could not send Telegram sticker to WhatsApp:', error.message);
+    }
+
+});
+
+
 bot.catch((error) => {
     console.error('Telegram bot error:', error.message);
 });
@@ -505,6 +605,9 @@ async function startWhatsApp() {
 
     // 5. listen for new messages
     whatsapp.ev.on('messages.upsert', async (event) => {
+        if (event.type !== 'notify') {// Ex - if message send after bridge off then do not forward it to TG while bridge on, fot that we will use ** PM2 - upervisor of our bridge
+            return;
+        }
         for (const message of event.messages) {
             const groupId = message.key.remoteJid;
 
@@ -660,6 +763,48 @@ async function startWhatsApp() {
 
             }
 
+
+            //handle static sticker share
+            const stickerMessage = message.message?.stickerMessage;
+
+            if (stickerMessage) {
+                if (stickerMessage.isAnimated) {
+                    console.log('Only static WhatsApp stickers are supported right now.');
+                    continue;
+                }
+
+                try {
+                    const stickerBuffer = await downloadMediaMessage(
+                        message, // which WhatsApp message to download
+                        'buffer', // return the downloaded file as a Buffer
+                        {}, // extra download options — currently none
+                        { // recovery/logging settings
+
+                            logger: pino({ level: 'silent' }),
+                            reuploadRequest: whatsapp.updateMediaMessage
+                        }
+                    );
+
+                    await bot.telegram.sendSticker(
+                        telegramGroupId,
+                        { source: stickerBuffer },
+                    );
+
+                    await bot.telegram.sendMessage(
+                        telegramGroupId,
+                        `[WhatsApp] ${senderName} sent a sticker.`
+                    );
+
+                    console.log(`Sent WhatsApp sticker to Telegram from ${senderName}`);
+
+                } catch (error) {
+                    console.error('Could not send WhatsApp sticker to Telegram:', error.message);
+                }
+
+                continue; //someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
+            }
+
+
             //handle audio message for now
             const audioMessage = message.message?.audioMessage;
 
@@ -728,6 +873,66 @@ async function startWhatsApp() {
 
                 } catch (error) {
                     console.error('Could not send WhatsApp location to Telegram:', error.message);
+                }
+
+                continue;
+            }
+
+
+            // handle share contact
+            const whatsappContacts =
+                message.message?.contactsArrayMessage?.contacts ||
+                (message.message?.contactMessage
+                    ? [message.message.contactMessage]
+                    : []
+                );
+
+            if (whatsappContacts.length > 0) {
+                try {
+                    let sentContactCount = 0;
+
+                    for (const sharedContact of whatsappContacts) {
+                        const vcard = sharedContact.vcard || '';
+
+                        const fullName =
+                            vcard.match(/^FN:(.+)$/m)?.[1]?.trim() ||
+                            sharedContact.displayName ||
+                            'WhatsApp contact';
+
+                        const phoneLine = vcard
+                            .split(/\r?\n/)
+                            .find((line) => line.toUpperCase().includes('TEL'));
+
+                        const phoneNumber = phoneLine
+                            ?.split(':')
+                            .slice(1)
+                            .join(':')
+                            .trim();
+
+                        if (!phoneNumber) {
+                            console.log('Could not read a phone number from this WhatsApp contact.');
+                            continue;
+                        }
+
+                        await bot.telegram.sendContact(
+                            telegramGroupId,
+                            phoneNumber,
+                            fullName
+                        );
+
+                        sentContactCount += 1;
+                    }
+
+                    if (sentContactCount > 0) {
+                        await bot.telegram.sendMessage(
+                            telegramGroupId,
+                            `[WhatsApp] ${senderName} shared ${sentContactCount} contact(s).`
+                        );
+
+                        console.log(`Sent WhatsApp contact(s) to Telegram from ${senderName}`);
+                    }
+                } catch (error) {
+                    console.error('Could not send WhatsApp contact to Telegram:', error.message);
                 }
 
                 continue;
