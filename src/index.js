@@ -7,20 +7,73 @@ import makeWASocket, {
     useMultiFileAuthState
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import qrcode, { error } from 'qrcode-terminal';
-
+import qrcode from 'qrcode-terminal';
 
 console.log('Step 1: File started');
 
 let isWhatsAppReady = false;// This flag will be set to true when WhatsApp is ready.
 
-const bridgeSentWhatsAppMessageIds = new Set();
+const bridgeSentWhatsAppMessageIds = new Set(); // stores WhatsApp message IDs that were sent by the bridge, so we can ignore them when they come back from WhatsApp. This prevents loops where a message sent from Telegram to WhatsApp is then forwarded back to Telegram.
+
+const telegramToWhatsAppMessages = new Map(); // stores - Telegram message ID → full matching WhatsApp message for native text reply bubbles. We store the full WhatsApp message object, not only ABC123, because Baileys needs the full WhatsApp message when we ask it to create a real reply bubble.
+const whatsappToTelegramMessageIds = new Map(); // stores - WhatsApp message ID → matching Telegram message ID for native text reply bubbles.
+
 function rememberBridgeWhatsAppMessage(sentMessage) { // add WA message ID to bridgeSentWhatsAppMessageIds
     const messageId = sentMessage?.key?.id;
 
     if (messageId) {
         bridgeSentWhatsAppMessageIds.add(messageId);
     }
+}
+
+
+// It does three jobs
+// 1. Connect Telegram and WhatsApp copies of the same message
+// 2. Save the connection in both directions
+// 3. Remove old connections when there are too many
+// --------- It does not ----------
+// send any message
+// forward any media
+// create the reply bubble itself
+const MAX_REPLY_MAPPINGS = 500;
+
+function rememberReplyMapping(telegramMessageId, whatsappMessage) { //rememberReplyMapping holds the mapping of WhatsApp message ID to Telegram message ID for future replies.
+    const whatsappMessageId = whatsappMessage?.key?.id;
+
+    if (!telegramMessageId || !whatsappMessageId) {
+        return;
+    }
+
+    telegramToWhatsAppMessages.set( // Telegram ID → WhatsApp message, because Baileys needs the full WhatsApp message to create a real reply bubble
+        telegramMessageId,
+        whatsappMessage
+    );
+
+    whatsappToTelegramMessageIds.set( // WhatsApp ID → Telegram ID, because Telegraf only needs the Telegram message ID to create a real reply bubble
+        whatsappMessageId,
+        telegramMessageId
+    );
+
+    if (telegramToWhatsAppMessages.size > MAX_REPLY_MAPPINGS) {
+        const oldestTelegramMessageId = telegramToWhatsAppMessages.keys().next().value; //contains the Telegram ID,
+
+        const oldestWhatsAppMessage = telegramToWhatsAppMessages.get(oldestTelegramMessageId); // while the this contains the full WhatsApp message object.
+
+        telegramToWhatsAppMessages.delete(oldestTelegramMessageId); // is stored in the Map, this deletes that whole stored entry: 501 → WA-ABC123
+
+        if (oldestWhatsAppMessage?.key?.id) { //checks whether the saved old WhatsApp message object has an ID available.
+
+            whatsappToTelegramMessageIds.delete(oldestWhatsAppMessage.key.id); //oldestWhatsAppMessage.key.id = WA-ABC123, deletes the matching reverse mapping: WA-ABC123 → 501
+        }
+    }
+
+    //     Save relationship:
+    // Telegram 101 ↔ WhatsApp ABC123
+
+    // When over 500:
+    // Remove both sides:
+    // Telegram 101 ✕ WhatsApp ABC123
+
 }
 
 
@@ -148,6 +201,61 @@ function getWhatsAppQuotedText(message) {
     }
 
     return '[message]';
+};
+
+
+function getWhatsAppContextInfo(message) {
+    return (
+        message.message?.extendedTextMessage?.contextInfo ||
+        message.message?.imageMessage?.contextInfo ||
+        message.message?.documentMessage?.contextInfo ||
+        message.message?.videoMessage?.contextInfo ||
+        message.message?.audioMessage?.contextInfo ||
+        message.message?.stickerMessage?.contextInfo ||
+        message.message?.locationMessage?.contextInfo ||
+        message.message?.contactMessage?.contextInfo ||
+        message.message?.contactsArrayMessage?.contextInfo
+    );
+}
+
+// The getWhatsAppQuotedMessageId holds:
+// Reply message → older WhatsApp message ID
+// Normal message → empty string
+function getWhatsAppQuotedMessageId(message) {
+    return getWhatsAppContextInfo(message)?.stanzaId || '';
+}
+
+// This function is used to get the reply options for a Telegram message that is replying to a WhatsApp message. It checks if the Telegram message is a reply to another message, and if so, it looks up the corresponding WhatsApp message in the telegramToWhatsAppMessages map. If a matching WhatsApp message is found, it returns an object with the quoted property set to that WhatsApp message. If no matching WhatsApp message is found, it returns undefined.
+function getTelegramWhatsAppReplyOptions(ctx) {
+    const repliedTelegramMessageId =
+        ctx.message.reply_to_message?.message_id; // ID of reply to message e.g - 101 means old message ID of Telegram message
+
+    const quotedWhatsAppMessage = repliedTelegramMessageId  // quotedWAMessage holds the full WhatsApp message object for the old message bubble.
+        ? telegramToWhatsAppMessages.get(repliedTelegramMessageId) //The Map gives us the matching WhatsApp message:WhatsApp message ABC123 attach with 101 ID of TG
+        : undefined;
+
+    return quotedWhatsAppMessage
+        ? { quoted: quotedWhatsAppMessage } // ***This is basicallly the old message bubble, if found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+        : undefined;
+}
+
+// This function is used to get the reply options for a WhatsApp message that is replying to a Telegram message. It checks if the WhatsApp message is a reply to another message, and if so, it looks up the corresponding Telegram message ID in the whatsappToTelegramMessageIds map. If a matching Telegram message ID is found, it returns an object with the reply_parameters property set to an object containing the message_id of the replied Telegram message. If no matching Telegram message ID is found, it returns an empty object.
+function getWhatsAppTelegramReplyOptions(message) {
+    const quotedWhatsAppMessageId =
+        getWhatsAppQuotedMessageId(message); // holds that old message ID
+
+    const repliedTelegramMessageId = quotedWhatsAppMessageId
+        ? whatsappToTelegramMessageIds.get(quotedWhatsAppMessageId) // Find in map for old message with that above ID
+        : undefined;
+
+    // this is the old message ID of that old message bubble, if found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+    return repliedTelegramMessageId
+        ? {
+            reply_parameters: {
+                message_id: repliedTelegramMessageId // ***create a reply bubble in Telegram with that old message ID, if found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+            }
+        }
+        : {};
 }
 
 
@@ -165,11 +273,24 @@ bot.on('text', async (ctx) => {
     console.log(`[Telegram received] ${senderName}: ${text}`);
 
     //const forwardedText = `[Telegram] ${senderName}: ${text}`;
-    const replyText = getTelegramReplyText(ctx);
+    const replyText = getTelegramReplyText(ctx);// Type of message [older one]
 
-    const forwardedText = replyText
-        ? `[Telegram] ${senderName} replied to:\n"${replyText}"\n\n${text}`
-        : `[Telegram] ${senderName}: ${text}`;
+    const repliedTelegramMessageId =
+        ctx.message.reply_to_message?.message_id; // ID of reply to message e.g - 101
+
+    const quotedWhatsAppMessage = // quotedWAMessage holds the full WhatsApp message object for the old message bubble.
+        repliedTelegramMessageId
+            ?
+            telegramToWhatsAppMessages.get(repliedTelegramMessageId) //The Map gives us the matching WhatsApp message:WhatsApp message ABC123 attach with 101 ID of TG
+            : undefined;
+
+
+    const forwardedText = quotedWhatsAppMessage
+        ? `[Telegram] ${senderName}: ${text}`
+        : replyText //Does Telegram still provide the text of the old message?
+            ? `[Telegram] ${senderName} replied to:\n"${replyText}"\n\n${text}`
+            : `[Telegram] ${senderName}: ${text}`;
+
 
 
     try {
@@ -177,10 +298,19 @@ bot.on('text', async (ctx) => {
             console.log('WhatsApp is not ready yet. Please wait for [WA] Ready before sending Telegram messages.');
             return;
         }
-        const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
-            text: forwardedText
-        });
+        const sentMessage = await whatsapp.sendMessage(
+            whatsappGroupId,
+            {
+                text: forwardedText
+            },
+            quotedWhatsAppMessage
+                ? { quoted: quotedWhatsAppMessage } //Send new WhatsApp message as a reply to this older WhatsApp message.
+                : undefined);
+
+        // Prevents loops.
         rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         console.log('Sent Telegram message to WhatsApp:', forwardedText);
     } catch (error) {
@@ -209,12 +339,18 @@ bot.on('photo', async (ctx) => {
 
         const photoBuffer = await downloadTelegramFile(ctx, bestPhoto.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             image: photoBuffer, // Send the photo as an image message
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a photo.`
-        });
+        },
+            whatsappReplyOptions // If the Telegram message is a reply to another message, this will include the quoted WhatsApp message for proper reply threading.
+        );
 
         rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
 
         console.log(`Sent Telegram photo to WhatsApp from ${senderName}`);
@@ -245,6 +381,8 @@ bot.on('document', async (ctx) => {
 
         const documentBuffer = await downloadTelegramFile(ctx, document.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             document: documentBuffer,
             fileName: fileName,
@@ -252,9 +390,13 @@ bot.on('document', async (ctx) => {
             caption: caption
                 ? `[Telegram] ${senderName}: ${caption}`
                 : `[Telegram] ${senderName} sent a document: ${fileName}`
-        });
+        },
+            whatsappReplyOptions
+        );
 
         rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         console.log(`Sent Telegram document to WhatsApp from ${senderName}: ${fileName}`);
 
@@ -285,12 +427,18 @@ bot.on('video', async (ctx) => {
 
         const videoBuffer = await downloadTelegramFile(ctx, video.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentMessage = await whatsapp.sendMessage(whatsappGroupId, {
             video: videoBuffer,
             caption: caption ? `[Telegram] ${senderName}: ${caption}` : `[Telegram] ${senderName} sent a video.`
-        });
+        },
+            whatsappReplyOptions
+        );
 
         rememberBridgeWhatsAppMessage(sentMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         console.log(`Sent Telegram video to WhatsApp from ${senderName}`);
 
@@ -321,13 +469,17 @@ bot.on('voice', async (ctx) => {
 
         const voiceBuffer = await downloadTelegramFile(ctx, voice.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentVoiceMessage = await whatsapp.sendMessage(whatsappGroupId, {
             audio: voiceBuffer,
             mimetype: 'audio/ogg; codecs=opus',
             ptt: true
-        });
+        }, whatsappReplyOptions);
 
         rememberBridgeWhatsAppMessage(sentVoiceMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentVoiceMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: `[Telegram] ${senderName} sent a voice note.`
@@ -367,13 +519,17 @@ bot.on('audio', async (ctx) => {
 
         const audioBuffer = await downloadTelegramFile(ctx, audio.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentAudioMessage = await whatsapp.sendMessage(whatsappGroupId, {
             audio: audioBuffer,
             mimetype: mimeType,
             fileName: fileName
-        });
+        }, whatsappReplyOptions);
 
         rememberBridgeWhatsAppMessage(sentAudioMessage);// call function to add WA message ID to bridgeSentWhatsAppMessageIds
+
+        rememberReplyMapping(ctx.message.message_id, sentAudioMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: caption
@@ -409,14 +565,18 @@ bot.on('location', async (ctx) => {
             return;
         }
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentLocationMessage = await whatsapp.sendMessage(whatsappGroupId, {
             location: {
                 degreesLatitude: location.latitude,
                 degreesLongitude: location.longitude
             }
-        });
+        }, whatsappReplyOptions);
 
         rememberBridgeWhatsAppMessage(sentLocationMessage);
+
+        rememberReplyMapping(ctx.message.message_id, sentLocationMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: `[Telegram] ${senderName} shared a location.`
@@ -467,14 +627,18 @@ bot.on('contact', async (ctx) => {
             'END:VCARD'
         ].join('\n');
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentContactMessage = await whatsapp.sendMessage(whatsappGroupId, {
             contacts: {
                 displayName: fullName,
                 contacts: [{ vcard }]
             }
-        });
+        }, whatsappReplyOptions);
 
         rememberBridgeWhatsAppMessage(sentContactMessage);
+
+        rememberReplyMapping(ctx.message.message_id, sentContactMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: `[Telegram] ${senderName} shared contact: ${fullName}`
@@ -515,11 +679,15 @@ bot.on('sticker', async (ctx) => {
 
         const stickerBuffer = await downloadTelegramFile(ctx, sticker.file_id);
 
+        const whatsappReplyOptions = getTelegramWhatsAppReplyOptions(ctx);
+
         const sentStickerMessage = await whatsapp.sendMessage(whatsappGroupId, {
             sticker: stickerBuffer
-        });
+        }, whatsappReplyOptions);
 
         rememberBridgeWhatsAppMessage(sentStickerMessage);
+
+        rememberReplyMapping(ctx.message.message_id, sentStickerMessage); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
         const sentTextMessage = await whatsapp.sendMessage(whatsappGroupId, {
             text: `[Telegram] ${senderName} sent a sticker.`
@@ -632,6 +800,18 @@ async function startWhatsApp() {
 
             let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
 
+            const photoQuotedWhatsAppMessageId = getWhatsAppQuotedMessageId(message);
+
+            const photoRepliedTelegramMessageId = photoQuotedWhatsAppMessageId
+                ? whatsappToTelegramMessageIds.get(photoQuotedWhatsAppMessageId)
+                : undefined;
+
+
+            const telegramReplyOptions = photoRepliedTelegramMessageId
+                ? {
+                    reply_to_message_id: photoRepliedTelegramMessageId
+                }
+                : {};
             // handle media messages (images for now)
             const imageMessage = message.message?.imageMessage;
 
@@ -654,14 +834,16 @@ async function startWhatsApp() {
                         }
                     );
 
-                    await bot.telegram.sendPhoto(
+                    const sentTelegramPhoto = await bot.telegram.sendPhoto(
                         telegramGroupId,
                         { source: photoBuffer },
                         {
-                            caption: caption ? `[WhatsApp] ${senderName}: ${caption}` : `[WhatsApp] ${senderName} sent a photo.`
+                            caption: caption ? `[WhatsApp] ${senderName}: ${caption}` : `[WhatsApp] ${senderName} sent a photo.`,
+                            ...telegramReplyOptions
                         }
-
                     );
+
+                    rememberReplyMapping(sentTelegramPhoto.message_id, message); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
                     console.log(`sent WhatsApp photo to Telegram from ${senderName}`);
                 } catch (error) {
@@ -697,7 +879,7 @@ async function startWhatsApp() {
                         }
                     );
 
-                    await bot.telegram.sendDocument(
+                    const sentTelegramDocument = await bot.telegram.sendDocument(
                         telegramGroupId,
                         {
                             source: documentBuffer,
@@ -706,9 +888,13 @@ async function startWhatsApp() {
                         {
                             caption: caption
                                 ? `[WhatsApp] ${senderName}: ${caption}`
-                                : `[WhatsApp] ${senderName} sent a document: ${fileName}`
+                                : `[WhatsApp] ${senderName} sent a document: ${fileName}`,
+                            ...telegramReplyOptions
                         }
+
                     );
+
+                    rememberReplyMapping(sentTelegramDocument.message_id, message); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
                     console.log(`Sent WhatsApp document to Telegram from ${senderName}: ${fileName}`);
 
@@ -743,13 +929,18 @@ async function startWhatsApp() {
                         }
                     );
 
-                    await bot.telegram.sendVideo(
+                    const sentTelegramVideo = await bot.telegram.sendVideo(
                         telegramGroupId,
                         { source: videoBuffer },
                         {
                             caption: caption ? `[WhatsApp] ${senderName}: ${caption}` : `[WhatsApp] ${senderName} sent a video.`
+                            ,
+                            ...telegramReplyOptions
                         }
+
                     );
+
+                    rememberReplyMapping(sentTelegramVideo.message_id, message); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
                     console.log(`Sent WhatsApp video to Telegram from ${senderName}`)
 
@@ -785,10 +976,13 @@ async function startWhatsApp() {
                         }
                     );
 
-                    await bot.telegram.sendSticker(
+                    const sentTelegramSticker = await bot.telegram.sendSticker(
                         telegramGroupId,
                         { source: stickerBuffer },
+                        telegramReplyOptions
                     );
+
+                    rememberReplyMapping(sentTelegramSticker.message_id, message); // call function to add mapping of WhatsApp message ID to Telegram message ID for future replies.
 
                     await bot.telegram.sendMessage(
                         telegramGroupId,
@@ -800,7 +994,6 @@ async function startWhatsApp() {
                 } catch (error) {
                     console.error('Could not send WhatsApp sticker to Telegram:', error.message);
                 }
-
                 continue; //someone send something then loop has to check for that other message also but in 'return' it doesnot checks, it simply return whole upsert
             }
 
@@ -821,25 +1014,32 @@ async function startWhatsApp() {
                     );
 
                     if (audioMessage.ptt) {
-                        await bot.telegram.sendVoice(
+                        const sentTelegramVoice = await bot.telegram.sendVoice(
                             telegramGroupId,
-                            { source: audioBuffer },// else also have same output as audioBuffer but, diff is how TG will identify between audio and vioce notes and TG method sendVoice and sendAudio
+                            { source: audioBuffer },
                             {
                                 caption: `[WhatsApp] ${senderName} sent a voice note.`
+                                ,
+                                ...telegramReplyOptions
                             }
+
                         );
+
+                        rememberReplyMapping(sentTelegramVoice.message_id, message);
 
                         console.log(`Sent WhatsApp voice note to Telegram from ${senderName}`)
 
                     } else {
-                        await bot.telegram.sendAudio(
+                        const sentTelegramAudio = await bot.telegram.sendAudio(
                             telegramGroupId,
                             { source: audioBuffer },
                             {
                                 caption: `[WhatsApp] ${senderName} sent an audio file.`
-                            }
-                        );
 
+                                , ...telegramReplyOptions
+                            });
+
+                        rememberReplyMapping(sentTelegramAudio.message_id, message);
                         console.log(`Sent WhatsApp audio to Telegram from ${senderName}`)
 
                     }
@@ -858,11 +1058,15 @@ async function startWhatsApp() {
 
             if (locationMessage) {
                 try {
-                    await bot.telegram.sendLocation(
+                    const sentTelegramLocation = await bot.telegram.sendLocation(
                         telegramGroupId,
                         locationMessage.degreesLatitude,
-                        locationMessage.degreesLongitude
+                        locationMessage.degreesLongitude,
+                        telegramReplyOptions
+
                     );
+
+                    rememberReplyMapping(sentTelegramLocation.message_id, message);
 
                     await bot.telegram.sendMessage(
                         telegramGroupId,
@@ -914,11 +1118,15 @@ async function startWhatsApp() {
                             continue;
                         }
 
-                        await bot.telegram.sendContact(
+                        const sentTelegramContact = await bot.telegram.sendContact(
                             telegramGroupId,
                             phoneNumber,
-                            fullName
+                            fullName,
+                            telegramReplyOptions
+
                         );
+
+                        rememberReplyMapping(sentTelegramContact.message_id, message);
 
                         sentContactCount += 1;
                     }
@@ -972,15 +1180,39 @@ async function startWhatsApp() {
             }
 
             //const forwardedText = `[WhatsApp] ${senderName}: ${text}`;
-            const quotedText = getWhatsAppQuotedText(message);
+            const quotedText = getWhatsAppQuotedText(message); // holds the text of the older WhatsApp message if this is a reply, or undefined if not a reply.
 
-            const forwardedText = quotedText
-                ? `[WhatsApp] ${senderName} replied to:\n"${quotedText}"\n\n${text}`
-                : `[WhatsApp] ${senderName}: ${text}`;
+            const quotedWhatsAppMessageId = getWhatsAppQuotedMessageId(message); // holds that old message ID
+
+            const repliedTelegramMessageId = quotedWhatsAppMessageId
+                ? whatsappToTelegramMessageIds.get(quotedWhatsAppMessageId) // Find in map for old message with that above ID
+                : undefined;
+
+            const forwardedText = repliedTelegramMessageId // if reply
+                ? `[WhatsApp] ${senderName}: ${text}` // then this is new text with that old reply bubble message, if old message found in MAP
+                : quotedText
+                    ? `[WhatsApp] ${senderName} replied to:\n"${quotedText}"\n\n${text}` // this is also new text but only works when old Message not in map then send new reply with old format old message.
+                    : `[WhatsApp] ${senderName}: ${text}`; // this is also new message only when normal new messsage[no reply]
 
 
             try {
-                await bot.telegram.sendMessage(telegramGroupId, forwardedText);
+                const sentTelegramMessage = await bot.telegram.sendMessage(
+                    telegramGroupId,
+                    forwardedText, // this is the new text with or without old message bubble, if old message found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+                    repliedTelegramMessageId // this is the old message ID of that old message bubble, if found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+                        ? {
+                            reply_parameters: {
+                                message_id: repliedTelegramMessageId // create a reply bubble in Telegram with that old message ID, if found in MAP then send new text with that old message bubble, if not found then send new text with old format of reply.
+                            }
+                        }
+                        : undefined
+                );
+
+                rememberReplyMapping( // holds the mapping of WhatsApp message ID to Telegram message ID for future replies.
+                    sentTelegramMessage.message_id,
+                    message // message from loop
+                );
+
                 console.log('Sent WhatsApp message to Telegram:', forwardedText);
             } catch (error) {
                 console.error('Could not send WhatsApp message to Telegram:', error.message);
