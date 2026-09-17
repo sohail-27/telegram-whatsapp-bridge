@@ -108,6 +108,15 @@ if (!whatsappGroupId) {
 
 const bot = new Telegraf(telegramToken);
 
+// for TG chat ID, we can use it to filter messages from a specific group or chat. This is useful if you want to only process messages from a certain group and ignore others. The chat ID can be obtained by sending a message to the bot and checking the logs for the chat ID.
+// bot.on('message', (ctx) => {
+//     console.log('[TG ID check]', {
+//         received: String(ctx.chat.id),
+//         configured: telegramGroupId,
+//         match: String(ctx.chat.id) === telegramGroupId
+//     });
+// });
+
 
 async function downloadTelegramFile(ctx, fileId) {
     const fileLink = await ctx.telegram.getFileLink(fileId); // Get the direct link to the photo file
@@ -779,6 +788,8 @@ async function startWhatsApp() {
         for (const message of event.messages) {
             const groupId = message.key.remoteJid;
 
+            // console.log('[WhatsApp chat ID]', groupId); // Log the WhatsApp chat ID
+
             if (bridgeSentWhatsAppMessageIds.has(message.key.id)) {
                 console.log('Skipping WhatsApp message because it was created by Telegram bridge.');
                 bridgeSentWhatsAppMessageIds.delete(message.key.id);
@@ -798,16 +809,19 @@ async function startWhatsApp() {
             const senderId = message.key.participant || message.key.remoteJid;
             const cleanSenderId = senderId.replace('@lid', '').replace('@s.whatsapp.net', '');
 
-            let senderName = contactNames[senderId] || `WhatsApp User ${cleanSenderId}`;
+            let senderName =
+                message.pushName ||
+                contactNames[senderId] ||
+                `WhatsApp User ${cleanSenderId}`;
 
-            const photoQuotedWhatsAppMessageId = getWhatsAppQuotedMessageId(message);
+            const photoQuotedWhatsAppMessageId = getWhatsAppQuotedMessageId(message);// holds the WhatsApp message ID of the older message that this new message is replying to, if it exists.
 
-            const photoRepliedTelegramMessageId = photoQuotedWhatsAppMessageId
+            const photoRepliedTelegramMessageId = photoQuotedWhatsAppMessageId // holds the Telegram message ID that corresponds to the quoted WhatsApp message ID, if it exists in the mapping.
                 ? whatsappToTelegramMessageIds.get(photoQuotedWhatsAppMessageId)
                 : undefined;
 
 
-            const telegramReplyOptions = photoRepliedTelegramMessageId
+            const telegramReplyOptions = photoRepliedTelegramMessageId // holds the Telegram reply options for the new message, if it is a reply to an older WhatsApp message that has a corresponding Telegram message ID in the mapping.
                 ? {
                     reply_to_message_id: photoRepliedTelegramMessageId
                 }
